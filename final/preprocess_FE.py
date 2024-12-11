@@ -1,6 +1,8 @@
 import pandas as pd
 import numpy as np
 from vacances_scolaires_france import SchoolHolidayDates
+from jours_feries_france import JoursFeries
+
             
 def get_zone_c_holidays():
     """
@@ -13,6 +15,26 @@ def get_zone_c_holidays():
     
     all_zone_c_holidays = list(zone_c_holidays_2020.keys()) + list(zone_c_holidays_2021.keys())
     return pd.to_datetime(all_zone_c_holidays)
+
+
+def get_public_holidays():
+    """
+    Fetch public holidays for a range of years in France.
+
+    Parameters:
+    - year_start (int): Start year for fetching holidays.
+    - year_end (int): End year for fetching holidays.
+    - include_alsace (bool): Include Alsace-Moselle specific holidays if True.
+
+    Returns:
+    - pd.Series: A series of public holidays as pandas datetime objects.
+    """
+    holidays_2020_2021 = (
+        list(JoursFeries.for_year(2020).values()) +
+        list(JoursFeries.for_year(2021).values())
+    )
+    return pd.to_datetime(holidays_2020_2021)
+    
 
 def curfew_periods(df, date_column="date_x"):
     """
@@ -73,11 +95,11 @@ def add_basic_date_features(X):
     Returns:
     pd.DataFrame: DataFrame with basic date features added.
     """
-    X["year"] = X["date_x"].dt.year
-    X["month"] = X["date_x"].dt.month
-    X["day"] = X["date_x"].dt.day
-    X["weekday"] = X["date_x"].dt.weekday
-    X["hour"] = X["date_x"].dt.hour
+    X.loc[:, "year"] = X["date_x"].dt.year
+    X.loc[:, "month"] = X["date_x"].dt.month
+    X.loc[:, "day"] = X["date_x"].dt.day
+    X.loc[:, "weekday"] = X["date_x"].dt.weekday
+    X.loc[:, "hour"] = X["date_x"].dt.hour
     return X
 
 def add_season_feature(X):
@@ -97,10 +119,10 @@ def add_season_feature(X):
         (X["month"].isin([9, 10, 11]))  # Fall
     ]
     seasons = ["Winter", "Spring", "Summer", "Fall"]
-    X["season"] = np.select(conditions, seasons, default="Unknown")
+    X.loc[:, "season"] = np.select(conditions, seasons, default="Unknown")
     return X
 
-def add_indicator_features(X, holidays):
+def add_indicator_features(X, school_holidays, public_holidays):
     """
     Add indicator features like holiday, weekend, lockdown, and peak hours.
 
@@ -112,12 +134,12 @@ def add_indicator_features(X, holidays):
     Returns:
     pd.DataFrame: DataFrame with indicator features added.
     """
-    X["holiday"] = X["date_x"].isin(holidays).astype(int)
-    X["weekend"] = (X["date_x"].dt.dayofweek > 4).astype(int)
+    X["school_holiday"] = X["date_x"].isin(school_holidays).astype(int)
+    X["public_holiday"] = X["date_x"].isin(public_holidays).astype(int)
     X['is_peak'] = X['hour'].apply(lambda x: 1 if (6 <= x < 9 or 16 <= x < 19) else 0)
     return X
 
-def encode_dates(X, holidays):
+def encode_dates(X, school_holidays, public_holidays):
     """
     Encode date information by adding various features.
 
@@ -131,10 +153,9 @@ def encode_dates(X, holidays):
 
     X = add_basic_date_features(X)
     X = add_season_feature(X)
-    X = add_indicator_features(X, holidays)
+    X = add_indicator_features(X, school_holidays, public_holidays)
     X = create_cyclical_features(X, 'hour', 24)
     X = create_cyclical_features(X, 'month', 12)
-    X = create_cyclical_features(X, 'weekday', 7)
     X = curfew_periods(X)
 
 
@@ -154,10 +175,6 @@ def categorize_weather(data):
         data['rr1'], bins=[-1, 0, 2, 10, float('inf')],
         labels=['No Rain', 'Light Rain', 'Moderate Rain', 'Heavy Rain']
     )
-    # data['snow_category'] = pd.cut(
-    #    data['ht_neige'], bins=[-1, 0, 0.01, 0.05, float('inf')],
-    #    labels=['No Snow', 'Light Snow', 'Moderate Snow', 'Heavy Snow']
-    # )
     return data
 
 def add_weather_indicators(data):
@@ -189,19 +206,20 @@ def engineer_weather_features(data):
     data = add_weather_indicators(data)
     return data
 
-def remove_outliers(data):
-    data["date_truncated"] = data["date"].dt.floor("D")
-
-    cleaned_data = (
-        data.groupby(["counter_name", "date_truncated"])
-        ["log_bike_count"].sum()
-        .to_frame()
+def delete_zeros(data):
+    data["truncated_date"] = data["date"].dt.floor("D")
+    
+    zero_count_days = (
+        data.groupby(["counter_name", "truncated_date"], observed=False)["log_bike_count"]
+        .sum()
         .reset_index()
-        .query("log_bike_count == 0")
-        [["counter_name", "date_truncated"]]
-        .merge(data, on=["counter_name", "date_truncated"], how="right", indicator=True)
-        .query("_merge == 'right_only'")
-        .drop(columns=["_merge", "date_truncated"])
+        .loc[lambda x: x["log_bike_count"] == 0, ["counter_name", "truncated_date"]]
     )
-
+    
+    cleaned_data = (
+        data.merge(zero_count_days, on=["counter_name", "truncated_date"], how="outer", indicator=True)
+        .query("_merge == 'left_only'")
+        .drop(columns=["_merge", "truncated_date"])
+    )
     return cleaned_data
+
